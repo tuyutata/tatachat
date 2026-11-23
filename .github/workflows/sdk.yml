@@ -1,0 +1,204 @@
+# 回归和编译塔塔聊天SDK，正式交付唯一完整包并维护运行历史。
+
+name: 塔塔聊天·SDK
+run-name: 塔塔聊天·SDK·v1.0.${{ github.run_number }}
+'on':
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.repository }}-sdk
+  cancel-in-progress: false
+permissions:
+  contents: read
+  actions: read
+env:
+  PRODUCT_ID: tatachat
+  PRODUCT_TITLE: 塔塔聊天
+  PRODUCT_PLATFORM: sdk
+  PLATFORM_TITLE: SDK
+  WORKFLOW_FILE: sdk.yml
+  EXTENSION: '.zip'
+  RELEASE_VERSION: 1.0.${{ github.run_number }}
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    name: 塔塔聊天·SDK·v1.0.${{ github.run_number }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      ARTIFACT_DIR: /tmp/tatachat-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - id: existing
+        name: 复用本轮已有完整交付
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        with:
+          script: |
+            // 成功Run重跑直接复用其完整正式交付，避免覆盖或误删已经成功的包。
+            core.setOutput('delivered','false');
+            const tag=process.env.PRODUCT_TITLE+'·'+process.env.PLATFORM_TITLE+'·v'+process.env.RELEASE_VERSION;
+            let release;try{release=(await github.rest.repos.getReleaseByTag({...context.repo,tag})).data;}catch(error){if(error.status===404)return;throw error;}
+            if(release.draft)return;
+            let proof;try{proof=JSON.parse(release.body);}catch{throw Error('同名正式版归属无效');}
+            const name=process.env.PRODUCT_ID+'-'+process.env.PLATFORM_TITLE+'-v'+process.env.RELEASE_VERSION+process.env.EXTENSION;
+            if(proof.product_id!==process.env.PRODUCT_ID||proof.platform!==process.env.PRODUCT_PLATFORM||proof.run_id!==context.runId||proof.source_sha!==context.sha||release.prerelease||release.assets.length!==1||release.assets[0].name!==name||release.assets[0].state!=='uploaded'||release.assets[0].size<=0)throw Error('同名正式版不是本轮完整交付');
+            const ref=(await github.rest.git.getRef({...context.repo,ref:'tags/'+tag})).data;
+            if(ref.object.type!=='commit'||ref.object.sha!==context.sha)throw Error('已有正式版Tag源码不符');
+            core.setOutput('delivered','true');
+            core.info('复用同一Run已经成功交付的正式包');
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        if: steps.existing.outputs.delivered != 'true'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - id: tools
+        if: steps.existing.outputs.delivered != 'true'
+        name: 读取本产品工具声明
+        run: |
+          node --input-type=module >> "$GITHUB_OUTPUT" <<'NODE'
+          const {tools}=await import('./scripts/config.mjs');
+          for(const [name,value] of Object.entries(tools))console.log(name+'='+value);
+          NODE
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        if: steps.existing.outputs.delivered != 'true'
+        with:
+          node-version: ${{ steps.tools.outputs.node }}
+          check-latest: false
+      - name: 验证唯一平台及组包回归
+        if: steps.existing.outputs.delivered != 'true'
+        run: node --test scripts/config.mjs scripts/build.mjs
+      - id: cache
+        if: steps.existing.outputs.delivered != 'true'
+        name: 恢复SDK工具及原锁依赖缓存
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809
+        with:
+          path: |
+            ${{ runner.temp }}/tatachat-flutter
+            ~/.pub-cache
+          key: tatachat-SDK-${{ runner.os }}-${{ runner.arch }}-${{ steps.tools.outputs.flutter }}-${{ hashFiles('pubspec.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            tatachat-SDK-${{ runner.os }}-${{ runner.arch }}-${{ steps.tools.outputs.flutter }}-${{ hashFiles('pubspec.lock') }}-
+            tatachat-SDK-${{ runner.os }}-${{ runner.arch }}-${{ steps.tools.outputs.flutter }}-
+      - name: 准备上游声明的官方Flutter
+        if: steps.existing.outputs.delivered != 'true'
+        env:
+          FLUTTER_ROOT: ${{ runner.temp }}/tatachat-flutter
+          FLUTTER_VERSION: ${{ steps.tools.outputs.flutter }}
+        run: |
+          set -euo pipefail
+          if [ ! -d "$FLUTTER_ROOT/.git" ]; then
+            git clone --depth=1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$FLUTTER_ROOT"
+          fi
+          test "$(git -C "$FLUTTER_ROOT" describe --tags --exact-match)" = "$FLUTTER_VERSION"
+          "$FLUTTER_ROOT/bin/flutter" --version
+      - name: 只组装SDK包
+        if: steps.existing.outputs.delivered != 'true'
+        env:
+          FLUTTER_ROOT: ${{ runner.temp }}/tatachat-flutter
+        run: |
+          node scripts/build.mjs sdk
+          unzip -t "$ARTIFACT_DIR/tatachat-SDK-v$RELEASE_VERSION.zip"
+      - name: 保存本产品增量缓存
+        if: steps.existing.outputs.delivered != 'true' && (always() && steps.cache.outputs.cache-primary-key != '')
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809
+        with:
+          path: |
+            ${{ runner.temp }}/tatachat-flutter
+            ~/.pub-cache
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: steps.existing.outputs.delivered != 'true'
+        with:
+          name: 塔塔聊天·SDK·v1.0.${{ github.run_number }}
+          path: ${{ env.ARTIFACT_DIR }}/*.zip
+          if-no-files-found: error
+      - name: 交付本产品唯一正式包
+        if: steps.existing.outputs.delivered != 'true'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        with:
+          script: |
+            const fs=require('node:fs');
+            const version=process.env.RELEASE_VERSION,tag=process.env.PRODUCT_TITLE+'·'+process.env.PLATFORM_TITLE+'·v'+version;
+            const name=process.env.PRODUCT_ID+'-'+process.env.PLATFORM_TITLE+'-v'+version+process.env.EXTENSION;
+            const file=process.env.ARTIFACT_DIR+'/'+name,bytes=fs.readFileSync(file);
+            if(!bytes.length)throw Error('交付包为空');
+            const repo=context.repo;
+            let previous;
+            try{previous=(await github.rest.repos.getReleaseByTag({...repo,tag})).data;}catch(error){if(error.status!==404)throw error;}
+            if(previous){
+             let proof;try{proof=JSON.parse(previous.body);}catch{throw Error('同名Release不属于本轮');}
+             if(!previous.draft||proof.product_id!==process.env.PRODUCT_ID||proof.platform!==process.env.PRODUCT_PLATFORM||proof.run_id!==context.runId||proof.source_sha!==context.sha)throw Error('禁止覆盖已有正式版或其它来源');
+             await github.rest.repos.deleteRelease({...repo,release_id:previous.id});
+            }
+            // 重跑失败Run可复用相同源码Tag；任何已有不同源码Tag均拒绝覆盖。
+            try{const ref=(await github.rest.git.getRef({...repo,ref:'tags/'+tag})).data;if(ref.object.type!=='commit'||ref.object.sha!==context.sha)throw Error('同名Tag源码不符');}
+            catch(error){if(error.status!==404)throw error;}
+            const body=JSON.stringify({product_id:process.env.PRODUCT_ID,platform:process.env.PRODUCT_PLATFORM,version,source_sha:context.sha,run_id:context.runId,run_attempt:Number(process.env.GITHUB_RUN_ATTEMPT),asset:name});
+            const draft=(await github.rest.repos.createRelease({...repo,tag_name:tag,target_commitish:context.sha,name:tag,body,draft:true,prerelease:false,make_latest:'false'})).data;
+            await github.rest.repos.uploadReleaseAsset({url:draft.upload_url,name,label:tag,data:bytes,headers:{'content-type':'application/octet-stream'}});
+            const actual=(await github.rest.repos.getRelease({...repo,release_id:draft.id})).data;
+            if(actual.assets.length!==1||actual.assets[0].name!==name||actual.assets[0].size!==bytes.length||actual.assets[0].state!=='uploaded')throw Error('正式附件未完整交付');
+            const released=(await github.rest.repos.updateRelease({...repo,release_id:draft.id,draft:false})).data;
+            if(released.draft||!released.published_at)throw Error('正式版未确认');
+            core.info('已交付 '+tag);
+  retain:
+    if: always() && github.ref == 'refs/heads/main'
+    needs: build
+    name: 塔塔聊天·SDK·v1.0.${{ github.run_number }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: write
+    env:
+      BUILD_RESULT: ${{ needs.build.result }}
+    steps:
+      - name: 保留本产品最近成功与失败记录
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        with:
+          script: |
+            // TATA.md第28条：每个产品/流程/平台仅保留最近成功1条、失败1条；不处理其它工作流和活动Run。
+            const repo=context.repo,workflow=process.env.WORKFLOW_FILE;
+            const current=(await github.rest.actions.getWorkflowRun({...repo,run_id:context.runId})).data;
+            if(current.path!=='.github/workflows/'+workflow||current.head_branch!=='main'||current.head_sha!==context.sha||current.event!=='workflow_dispatch')throw Error('本轮维护身份不符');
+            const all=await github.paginate(github.rest.actions.listWorkflowRuns,{...repo,workflow_id:workflow,branch:'main',event:'workflow_dispatch',per_page:100});
+            const terminal=all.filter(row=>row.id!==current.id&&row.status==='completed'&&row.path===current.path&&row.head_branch==='main'&&row.event==='workflow_dispatch');
+            const classify=row=>row.id===current.id?(process.env.BUILD_RESULT==='success'?'success':'failure'):(row.conclusion==='success'?'success':'failure');
+            const ordered=[...terminal,current].sort((a,b)=>b.run_number-a.run_number||b.id-a.id);
+            const success=ordered.find(row=>classify(row)==='success'),failure=ordered.find(row=>classify(row)==='failure');
+            const keep=new Set([success?.id,failure?.id].filter(Boolean));
+            const releases=await github.paginate(github.rest.repos.listReleases,{...repo,per_page:100});
+            const owned=releases.flatMap(release=>{let proof;try{proof=JSON.parse(release.body);}catch{return [];}
+             return proof?.product_id===process.env.PRODUCT_ID&&proof.platform===process.env.PRODUCT_PLATFORM?[{release,proof}]:[];});
+            if(success){
+             const matches=owned.filter(({release,proof})=>proof.run_id===success.id&&!release.draft&&!release.prerelease);
+             if(matches.length!==1||matches[0].proof.source_sha!==success.head_sha||matches[0].release.assets.length!==1||matches[0].release.assets[0].name!==matches[0].proof.asset||matches[0].release.assets[0].state!=='uploaded')throw Error('保留成功记录缺少完整正式版');
+            }
+            const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+            async function gone(read){for(let attempt=0;attempt<6;attempt++){
+             try{await read();}catch(error){if(error.status===404)return;throw error;}
+             if(attempt<5)await pause(250*2**attempt);
+            }throw Error('删除未获404确认');}
+            for(const {release,proof} of owned){
+             if(proof.run_id===success?.id)continue;
+             const row=proof.run_id===current.id?current:terminal.find(row=>row.id===proof.run_id);
+             if(!row||row.head_sha!==proof.source_sha)continue;
+             const refName='tags/'+release.tag_name;
+             try{const ref=(await github.rest.git.getRef({...repo,ref:refName})).data;
+              if(ref.object.type!=='commit'||ref.object.sha!==proof.source_sha)throw Error('待清理Tag归属不符');
+              await github.rest.git.deleteRef({...repo,ref:refName});await gone(()=>github.rest.git.getRef({...repo,ref:refName}));
+             }catch(error){if(error.status!==404)throw error;}
+             await github.rest.repos.deleteRelease({...repo,release_id:release.id});await gone(()=>github.rest.repos.getRelease({...repo,release_id:release.id}));
+            }
+            for(const row of terminal.filter(row=>!keep.has(row.id))){
+             const actual=(await github.rest.actions.getWorkflowRun({...repo,run_id:row.id})).data;
+             if(actual.status!=='completed'||actual.head_sha!==row.head_sha||actual.path!==current.path)throw Error('历史Run身份发生变化');
+             await github.rest.actions.deleteWorkflowRun({...repo,run_id:row.id});await gone(()=>github.rest.actions.getWorkflowRun({...repo,run_id:row.id}));
+            }
+            const remaining=await github.paginate(github.rest.actions.listWorkflowRuns,{...repo,workflow_id:workflow,branch:'main',event:'workflow_dispatch',per_page:100});
+            if(remaining.some(row=>row.status==='completed'&&row.path===current.path&&!keep.has(row.id)))throw Error('历史Run清理集合未收敛');
+            core.info('已保留本产品最近成功1条、失败1条');
